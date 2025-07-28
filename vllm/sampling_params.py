@@ -110,6 +110,16 @@ class RequestOutputKind(Enum):
     FINAL_ONLY = 2
 
 
+# Dynamic Temperature
+@dataclass
+class DynamicTemperatureConfig:
+    start_temp: float
+    end_temp: float
+    decay_steps: Optional[int] = None
+    decay_type: str = "linear"  # "linear" or "exponential"
+
+
+
 class SamplingParams(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -205,6 +215,8 @@ class SamplingParams(
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
     temperature: float = 1.0
+    # Dynamic Temperature
+    dynamic_temperature: Optional[DynamicTemperatureConfig] = None
     top_p: float = 1.0
     top_k: int = 0
     min_p: float = 0.0
@@ -257,6 +269,7 @@ class SamplingParams(
         frequency_penalty: Optional[float] = 0.0,
         repetition_penalty: Optional[float] = 1.0,
         temperature: Optional[float] = 1.0,
+        dynamic_temperature: Optional[DynamicTemperatureConfig] = None,
         top_p: Optional[float] = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
@@ -398,6 +411,19 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+
+        # Dynamic temperature
+        if self.dynamic_temperature is not None:
+            if (
+                self.dynamic_temperature.start_temp <= 0
+                or self.dynamic_temperature.end_temp <= 0
+            ):
+                raise ValueError("Dynamic temperature values must be positive")
+            if (
+                self.dynamic_temperature.decay_steps is not None
+                and self.dynamic_temperature.decay_steps <= 0
+            ):
+                raise ValueError("Decay steps must be positive")
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
