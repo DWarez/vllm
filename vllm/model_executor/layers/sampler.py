@@ -328,13 +328,6 @@ class Sampler(nn.Module):
 
         return temperatures
 
-    def _update_dynamic_temp_steps(self, sampling_metadata: SamplingMetadata):
-        """Update step counts for sequences using dynamic temperature."""
-        for seq_group in sampling_metadata.seq_groups:
-            if seq_group.sampling_params.dynamic_temperature is not None:
-                for seq_id in seq_group.seq_ids:
-                    self.dynamic_temp_tracker.increment_step(seq_id)
-
     def forward(
         self,
         logits: torch.Tensor,
