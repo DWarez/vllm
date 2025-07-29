@@ -55,3 +55,9 @@ class SamplingMetadata:
     xtc_exclusion_threshold: Optional[torch.Tensor] = None
     xtc_min_probability: Optional[torch.Tensor] = None
 
+    # DRY
+    use_dry: Optional[torch.Tensor] = None
+    dry_multiplier: Optional[torch.Tensor] = None
+    dry_base: Optional[torch.Tensor] = None
+    dry_allowed_length: Optional[torch.Tensor] = None
+    dry_sequence_breakers: dict[int, list[int]] = None

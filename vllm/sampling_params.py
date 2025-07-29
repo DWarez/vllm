@@ -205,8 +205,6 @@ class SamplingParams(
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
     temperature: float = 1.0
-    # Dynamic Temperature
-    dynamic_temperature: Optional[DynamicTemperatureConfig] = None
     top_p: float = 1.0
     top_k: int = 0
     min_p: float = 0.0
@@ -247,15 +245,23 @@ class SamplingParams(
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
     # Dynamic temperature parameters
-    use_dynamic_temperature: bool = True
-    initial_temperature: float = 1.2
-    final_temperature: float = 0.6
+    use_dynamic_temperature: bool = False
+    initial_temperature: Optional[float] = None
+    final_temperature: Optional[float] = None
     
     # XTC
     use_xtc: bool = False
-    xtc_exclude_top: int = 1
-    xtc_exclusion_threshold: float = 0.1
-    xtc_min_probability: float = 0.01
+    xtc_exclude_top: Optional[int] = None
+    xtc_exclusion_threshold: Optional[float] = None
+    xtc_min_probability: Optional[float] = None
+    
+    # DRY
+    use_dry: bool = False
+    dry_multiplier: Optional[float] = None
+    dry_base: Optional[float] = None
+    dry_allowed_length: Optional[int] = None
+    dry_sequence_breakers: Optional[list[int]] = None
+
 
 
     @staticmethod
@@ -408,19 +414,6 @@ class SamplingParams(
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
 
-        # Dynamic temperature
-        if self.dynamic_temperature is not None:
-            if (
-                self.dynamic_temperature.start_temp <= 0
-                or self.dynamic_temperature.end_temp <= 0
-            ):
-                raise ValueError("Dynamic temperature values must be positive")
-            if (
-                self.dynamic_temperature.decay_steps is not None
-                and self.dynamic_temperature.decay_steps <= 0
-            ):
-                raise ValueError("Decay steps must be positive")
-
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
@@ -525,7 +518,7 @@ class SamplingParams(
             self.initial_temperature or self.final_temperature
         ):
             logger.warning(
-                "You are trying to set an initial and final temperature but `use_dynami_temperature` is set to False."
+                "You are trying to set an initial and final temperature but `use_dynamic_temperature` is set to False."
             )
 
     def _verify_greedy_sampling(self) -> None:

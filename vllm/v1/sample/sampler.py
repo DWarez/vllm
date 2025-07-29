@@ -194,7 +194,6 @@ class Sampler(nn.Module):
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
 
-    
     # XTC
     def apply_xtc(
       self,
@@ -238,7 +237,100 @@ class Sampler(nn.Module):
       
       return logits
     
-    
+    # DRY
+    def apply_dry_penalty(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+      """Apply DRY (Don't Repeat Yourself) penalty to prevent sequence looping."""
+      if (sampling_metadata.use_dry is None or 
+          not sampling_metadata.use_dry.any() or
+          sampling_metadata.prompt_token_ids is None):
+          return logits
+      
+      for i in range(logits.shape[0]):
+          if not sampling_metadata.use_dry[i]:
+              continue
+              
+          # Get parameters for this request
+          multiplier = sampling_metadata.dry_multiplier[i].item()
+          base = sampling_metadata.dry_base[i].item()
+          allowed_length = sampling_metadata.dry_allowed_length[i].item()
+          sequence_breakers = sampling_metadata.dry_sequence_breakers.get(i, [])
+          
+          # Get the full context (prompt + generated tokens)
+          prompt_tokens = sampling_metadata.prompt_token_ids[i].tolist()
+          output_tokens = sampling_metadata.output_token_ids[i] if i < len(sampling_metadata.output_token_ids) else []
+          full_context = prompt_tokens + output_tokens
+          
+          # Track penalties applied
+          penalties_applied = 0
+          total_penalty = 0.0
+          
+          # For each possible next token, check if it would create a repetition
+          for token_id in range(logits.shape[-1]):
+              penalty = self._calculate_dry_penalty(
+                  full_context, token_id, multiplier, base, allowed_length, sequence_breakers
+              )
+              if penalty > 0:
+                  logits[i, token_id] -= penalty
+                  penalties_applied += 1
+                  total_penalty += penalty
+                  
+          # Summary log for this request
+          if penalties_applied > 0:
+              logger.warning(f"DRY summary for request {i}: {penalties_applied} tokens penalized, "
+                            f"total_penalty={total_penalty:.3f}, context_length={len(full_context)}, "
+                            f"params: multiplier={multiplier}, base={base}, allowed_length={allowed_length}")
+      return logits
+
+    def _calculate_dry_penalty(
+        self, 
+        context: list[int], 
+        next_token: int, 
+        multiplier: float, 
+        base: float, 
+        allowed_length: int,
+        sequence_breakers: list[int]
+    ) -> float:
+        """Calculate DRY penalty for a specific token."""
+        if not context:
+            return 0.0
+            
+        # Create the sequence that would result from adding next_token
+        extended_context = context + [next_token]
+        context_len = len(extended_context)
+        
+        # Look for the longest matching sequence ending at the current position
+        max_match_length = 0
+        
+        for start_pos in range(context_len - 1):
+            # Check if there's a sequence breaker that would interrupt matching
+            has_breaker = any(token in sequence_breakers for token in extended_context[start_pos:])
+            if has_breaker:
+                continue
+                
+            # Find matching sequence length
+            match_length = 0
+            for offset in range(min(context_len - start_pos, context_len)):
+                if start_pos + offset >= context_len:
+                    break
+                if extended_context[start_pos + offset] != extended_context[context_len - 1 - offset]:
+                    break
+                match_length += 1
+                
+            max_match_length = max(max_match_length, match_length)
+        
+        # Apply penalty if match exceeds allowed length
+        if max_match_length > allowed_length:
+            penalty = multiplier * (base ** (max_match_length - allowed_length))
+            logger.warning(f"DRY penalty applied: match_length={max_match_length}, penalty={penalty:.3f}, token={next_token}")
+            return penalty
+            
+        return 0.0
+      
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -271,6 +363,7 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         logits = self.apply_xtc(logits, sampling_metadata)
+        logits = self.apply_dry_penalty(logits, sampling_metadata)
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
             logits,

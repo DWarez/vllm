@@ -257,6 +257,27 @@ class InputBatch:
         self.xtc_min_probability_cpu = self.xtc_min_probability_cpu_tensor.numpy()
         
         
+        # DRY related
+        self.use_dry = torch.empty((max_num_reqs, ), dtype=torch.bool, device=device)
+        self.use_dry_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.bool, device="cpu", pin_memory=pin_memory)
+        self.use_dry_cpu = self.use_dry_cpu_tensor.numpy()
+        self.use_dry_reqs: set[str] = set()
+
+        self.dry_multiplier = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
+        self.dry_multiplier_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+        self.dry_multiplier_cpu = self.dry_multiplier_cpu_tensor.numpy()
+
+        self.dry_base = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
+        self.dry_base_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+        self.dry_base_cpu = self.dry_base_cpu_tensor.numpy()
+
+        self.dry_allowed_length = torch.empty((max_num_reqs, ), dtype=torch.int32, device=device)
+        self.dry_allowed_length_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.int32, device="cpu", pin_memory=pin_memory)
+        self.dry_allowed_length_cpu = self.dry_allowed_length_cpu_tensor.numpy()
+
+        # DRY sequence breakers stored per request (dict: req_index -> list of token_ids)
+        self.dry_sequence_breakers: dict[int, list[int]] = {}
+
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -399,31 +420,42 @@ class InputBatch:
                 req_index] = sampling_params.repetition_penalty
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
-
-            logger.warning(f"In input batch, use dynamic temperature per request is {sampling_params.use_dynamic_temperature}")
-            self.use_dynamic_temperature_cpu[req_index] = sampling_params.use_dynamic_temperature
+            
             if sampling_params.use_dynamic_temperature:
+                self.use_dynamic_temperature_cpu[req_index] = sampling_params.use_dynamic_temperature
                 self.use_dynamic_temperature_reqs.add(req_id)
                 
-            self.initial_temperature_cpu[req_index] = sampling_params.initial_temperature
-            self.final_temperature_cpu[req_index] = sampling_params.final_temperature
+                self.initial_temperature_cpu[req_index] = sampling_params.initial_temperature
+                self.final_temperature_cpu[req_index] = sampling_params.final_temperature
+                
+                # Initialize current step to 0 for new requests
+                self.current_step_cpu[req_index] = 0
+                
+                # Set max_steps from sampling_params.max_tokens or a default value
+                max_steps = getattr(sampling_params, 'max_tokens', 100)
+                if max_steps is None:
+                    max_steps = 100  # Default fallback
+                self.max_steps_cpu[req_index] = max_steps
             
-            # Initialize current step to 0 for new requests
-            self.current_step_cpu[req_index] = 0
-            
-            # Set max_steps from sampling_params.max_tokens or a default value
-            max_steps = getattr(sampling_params, 'max_tokens', 100)
-            if max_steps is None:
-                max_steps = 100  # Default fallback
-            self.max_steps_cpu[req_index] = max_steps
-            
-            self.use_xtc_cpu[req_index] = sampling_params.use_xtc
+        
             if sampling_params.use_xtc:
+                self.use_xtc_cpu[req_index] = sampling_params.use_xtc
                 self.use_xtc_reqs.add(req_id)
+                self.xtc_exclude_top_cpu[req_index] = sampling_params.xtc_exclude_top
+                self.xtc_exclusion_threshold_cpu[req_index] = sampling_params.xtc_exclusion_threshold
+                self.xtc_min_probability_cpu[req_index] = sampling_params.xtc_min_probability
 
-            self.xtc_exclude_top_cpu[req_index] = sampling_params.xtc_exclude_top
-            self.xtc_exclusion_threshold_cpu[req_index] = sampling_params.xtc_exclusion_threshold
-            self.xtc_min_probability_cpu[req_index] = sampling_params.xtc_min_probability
+            
+            if sampling_params.use_dry:
+                self.use_dry_cpu[req_index] = sampling_params.use_dry
+                self.use_dry_reqs.add(req_id)
+
+                self.dry_multiplier_cpu[req_index] = sampling_params.dry_multiplier
+                self.dry_base_cpu[req_index] = sampling_params.dry_base
+                self.dry_allowed_length_cpu[req_index] = sampling_params.dry_allowed_length
+
+                if sampling_params.dry_sequence_breakers:
+                    self.dry_sequence_breakers[req_index] = sampling_params.dry_sequence_breakers
 
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
@@ -508,6 +540,8 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.use_dynamic_temperature_reqs.discard(req_id)
         self.use_xtc_reqs.discard(req_id)
+        self.use_dry_reqs.discard(req_id)
+        self.dry_sequence_breakers.pop(req_index, None)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
@@ -579,6 +613,12 @@ class InputBatch:
         self.xtc_exclusion_threshold_cpu[i1], self.xtc_exclusion_threshold_cpu[i2] = self.xtc_exclusion_threshold_cpu[i2], self.xtc_exclusion_threshold_cpu[i1]
         self.xtc_min_probability_cpu[i1], self.xtc_min_probability_cpu[i2] = self.xtc_min_probability_cpu[i2], self.xtc_min_probability_cpu[i1]
 
+        
+        self.use_dry_cpu[i1], self.use_dry_cpu[i2] = self.use_dry_cpu[i2], self.use_dry_cpu[i1]
+        self.dry_multiplier_cpu[i1], self.dry_multiplier_cpu[i2] = self.dry_multiplier_cpu[i2], self.dry_multiplier_cpu[i1]
+        self.dry_base_cpu[i1], self.dry_base_cpu[i2] = self.dry_base_cpu[i2], self.dry_base_cpu[i1]
+        self.dry_allowed_length_cpu[i1], self.dry_allowed_length_cpu[i2] = self.dry_allowed_length_cpu[i2], self.dry_allowed_length_cpu[i1]
+        swap_dict_values(self.dry_sequence_breakers, i1, i2)
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -688,6 +728,14 @@ class InputBatch:
             self.xtc_exclusion_threshold_cpu[empty_index] = self.xtc_exclusion_threshold_cpu[last_req_index]
             self.xtc_min_probability_cpu[empty_index] = self.xtc_min_probability_cpu[last_req_index]
 
+            self.use_dry_cpu[empty_index] = self.use_dry_cpu[last_req_index]
+            self.dry_multiplier_cpu[empty_index] = self.dry_multiplier_cpu[last_req_index]
+            self.dry_base_cpu[empty_index] = self.dry_base_cpu[last_req_index]
+            self.dry_allowed_length_cpu[empty_index] = self.dry_allowed_length_cpu[last_req_index]
+
+            dry_sequence_breakers = self.dry_sequence_breakers.pop(last_req_index, None)
+            if dry_sequence_breakers is not None:
+                self.dry_sequence_breakers[empty_index] = dry_sequence_breakers
 
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
@@ -765,6 +813,12 @@ class InputBatch:
           copy_slice(self.xtc_exclusion_threshold_cpu_tensor, self.xtc_exclusion_threshold, num_reqs)
           copy_slice(self.xtc_min_probability_cpu_tensor, self.xtc_min_probability, num_reqs)
 
+        if not self.no_dry:
+          copy_slice(self.use_dry_cpu_tensor, self.use_dry, num_reqs)
+          copy_slice(self.dry_multiplier_cpu_tensor, self.dry_multiplier, num_reqs)
+          copy_slice(self.dry_base_cpu_tensor, self.dry_base, num_reqs)
+          copy_slice(self.dry_allowed_length_cpu_tensor, self.dry_allowed_length, num_reqs)
+
         needs_prompt_token_ids = (
             not self.no_penalties
             or self.logits_processing_needs_token_ids[:num_reqs].any())
@@ -810,6 +864,11 @@ class InputBatch:
             xtc_exclude_top=None if self.no_xtc else self.xtc_exclude_top[:num_reqs],
             xtc_exclusion_threshold=None if self.no_xtc else self.xtc_exclusion_threshold[:num_reqs],
             xtc_min_probability=None if self.no_xtc else self.xtc_min_probability[:num_reqs],
+            use_dry=None if self.no_dry else self.use_dry[:num_reqs],
+            dry_multiplier=None if self.no_dry else self.dry_multiplier[:num_reqs],
+            dry_base=None if self.no_dry else self.dry_base[:num_reqs],
+            dry_allowed_length=None if self.no_dry else self.dry_allowed_length[:num_reqs],
+            dry_sequence_breakers=self.dry_sequence_breakers,
         )
 
     @property
@@ -917,6 +976,10 @@ class InputBatch:
     @property
     def no_allowed_token_ids(self) -> bool:
         return len(self.has_allowed_token_ids) == 0
+      
+    @property
+    def no_dry(self) -> bool:
+      return len(self.use_dry_reqs) == 0
 
     def increment_current_steps(self) -> None:
         """Increment current step for all active requests using dynamic temperature."""
