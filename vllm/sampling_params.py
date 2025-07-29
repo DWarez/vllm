@@ -257,7 +257,7 @@ class SamplingParams(
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
     # Dynamic temperature parameters
-    use_dynamic_temperature: bool = False
+    use_dynamic_temperature: bool = True
     initial_temperature: float = 1.2
     final_temperature: float = 0.6
 
@@ -277,7 +277,7 @@ class SamplingParams(
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
-        use_dynamic_temperature: bool = False,
+        use_dynamic_temperature: bool = True,
         initial_temperature: float = 1.2,
         final_temperature: float = 0.6,
         include_stop_str_in_output: bool = False,

@@ -400,6 +400,7 @@ class Sampler(nn.Module):
                 sampling_metadata,
                 sampling_tensors.temperatures
             )
+            logger.warning("Applying dynamic temperature")
             logits.div_(temperatures.unsqueeze(dim=1))
         else:
           logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))

@@ -1641,6 +1641,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+        self.input_batch.increment_current_steps()
+        # to refresh current step
+        self.input_batch.sampling_metadata = self.input_batch._make_sampling_metadata()
+
         if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None

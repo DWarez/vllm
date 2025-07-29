@@ -13,6 +13,9 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 
@@ -90,12 +93,101 @@ class Sampler(nn.Module):
         )
         return sampler_output
 
+    def compute_dynamic_temperature(
+        self,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        """
+        Compute dynamic temperature based on generation step.
+        
+        Temperature decreases linearly from initial_temperature to final_temperature
+        over the course of generation steps.
+        
+        Args:
+            sampling_metadata: Contains dynamic temperature parameters and current step info
+            
+        Returns:
+            torch.Tensor: Updated temperature values for each request
+        """
+        # Start with the base temperature
+        temperature = sampling_metadata.temperature.clone()
+        
+        # Check individual conditions and log warnings
+        has_use_dynamic_temperature = hasattr(sampling_metadata, 'use_dynamic_temperature')
+        if not has_use_dynamic_temperature:
+            logger.warning("Dynamic temperature requested but 'use_dynamic_temperature' attribute not found in sampling_metadata")
+            return temperature
+        
+        use_dynamic_temperature_enabled = (has_use_dynamic_temperature and 
+                                         (sampling_metadata.use_dynamic_temperature.any() if 
+                                          torch.is_tensor(sampling_metadata.use_dynamic_temperature) 
+                                          else sampling_metadata.use_dynamic_temperature))
+        if has_use_dynamic_temperature and not use_dynamic_temperature_enabled:
+            logger.warning("Dynamic temperature disabled via use_dynamic_temperature=False")
+            return temperature
+        
+        has_initial_temperature = hasattr(sampling_metadata, 'initial_temperature')
+        if use_dynamic_temperature_enabled and not has_initial_temperature:
+            logger.warning("Dynamic temperature enabled but 'initial_temperature' attribute not found in sampling_metadata")
+        
+        has_final_temperature = hasattr(sampling_metadata, 'final_temperature')
+        if use_dynamic_temperature_enabled and not has_final_temperature:
+            logger.warning("Dynamic temperature enabled but 'final_temperature' attribute not found in sampling_metadata")
+        
+        has_current_step = hasattr(sampling_metadata, 'current_step')
+        if use_dynamic_temperature_enabled and not has_current_step:
+            logger.warning("Dynamic temperature enabled but 'current_step' attribute not found in sampling_metadata")
+        
+        has_max_steps = hasattr(sampling_metadata, 'max_steps')
+        if use_dynamic_temperature_enabled and not has_max_steps:
+            logger.warning("Dynamic temperature enabled but 'max_steps' attribute not found in sampling_metadata")
+        
+        if (has_use_dynamic_temperature and 
+            use_dynamic_temperature_enabled and
+            has_initial_temperature and
+            has_final_temperature and
+            has_current_step and
+            has_max_steps):
+            
+            # Get dynamic temperature parameters
+            initial_temp = sampling_metadata.initial_temperature
+            final_temp = sampling_metadata.final_temperature
+            # Use current_step + 1 because we want the temperature for the NEXT token
+            # current_step represents completed steps, but we're generating step current_step + 1
+            current_step = sampling_metadata.current_step + 1
+            logger.warning(f"current step: {current_step}")
+            max_steps = sampling_metadata.max_steps
+            
+            # Compute linear interpolation factor
+            # Clamp to avoid division by zero and ensure valid range
+            step_ratio = torch.clamp(current_step.float() / (max_steps.float() - 1), 0.0, 1.0)
+            
+            # Handle case where max_steps <= 1
+            step_ratio = torch.where(max_steps <= 1, torch.ones_like(step_ratio), step_ratio)
+            
+            # Linear interpolation from initial to final temperature
+            dynamic_temp = initial_temp + (final_temp - initial_temp) * step_ratio
+            logger.warning(f"dynamic temp: {dynamic_temp}")
+            
+            # Apply dynamic temperature only to requests that have it enabled
+            if torch.is_tensor(sampling_metadata.use_dynamic_temperature):
+                # Per-request dynamic temperature control
+                mask = sampling_metadata.use_dynamic_temperature
+                temperature = torch.where(mask, dynamic_temp, temperature)
+            else:
+                # Apply to all requests
+                temperature.copy_(dynamic_temp)
+                
+        logger.warning(f"temperature: {temperature}")
+        return temperature
+      
     def apply_temperature(
         self,
         logits: torch.Tensor,
         temp: torch.Tensor,
     ) -> torch.Tensor:
         # Use in-place division to avoid creating a new tensor.
+        # logger.warning(f"Applying temperature {temp}")
         return logits.div_(temp.unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
@@ -123,8 +215,9 @@ class Sampler(nn.Module):
 
         assert sampling_metadata.temperature is not None
 
+        dynamic_temperature = self.compute_dynamic_temperature(sampling_metadata)
         # Apply temperature.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        logits = self.apply_temperature(logits, dynamic_temperature)
 
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)

@@ -22,7 +22,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 @dataclass
 class CachedRequestState:
@@ -188,6 +190,54 @@ class InputBatch:
             self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
+        # switch to ones for Dynamic Temperature Always true
+        self.use_dynamic_temperature = torch.empty((max_num_reqs, ),
+                                                  dtype=torch.bool,
+                                                  device=device)
+        self.use_dynamic_temperature_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                             dtype=torch.bool,
+                                                             device="cpu",
+                                                             pin_memory=pin_memory)
+        self.use_dynamic_temperature_cpu = self.use_dynamic_temperature_cpu_tensor.numpy()
+        self.use_dynamic_temperature_reqs: set[str] = set()
+
+        self.initial_temperature = torch.empty((max_num_reqs, ),
+                                              dtype=torch.float32,
+                                              device=device)
+        self.initial_temperature_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                         dtype=torch.float32,
+                                                         device="cpu",
+                                                         pin_memory=pin_memory)
+        self.initial_temperature_cpu = self.initial_temperature_cpu_tensor.numpy()
+
+        self.final_temperature = torch.empty((max_num_reqs, ),
+                                            dtype=torch.float32,
+                                            device=device)
+        self.final_temperature_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                       dtype=torch.float32,
+                                                       device="cpu",
+                                                       pin_memory=pin_memory)
+        self.final_temperature_cpu = self.final_temperature_cpu_tensor.numpy()
+
+        # Current step tracking for dynamic temperature
+        self.current_step = torch.empty((max_num_reqs, ),
+                                       dtype=torch.int32,
+                                       device=device)
+        self.current_step_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                  dtype=torch.int32,
+                                                  device="cpu",
+                                                  pin_memory=pin_memory)
+        self.current_step_cpu = self.current_step_cpu_tensor.numpy()
+
+        self.max_steps = torch.empty((max_num_reqs, ),
+                                    dtype=torch.int32,
+                                    device=device)
+        self.max_steps_cpu_tensor = torch.empty((max_num_reqs, ),
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=pin_memory)
+        self.max_steps_cpu = self.max_steps_cpu_tensor.numpy()
+        
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -331,6 +381,23 @@ class InputBatch:
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
 
+            logger.warning(f"In input batch, use dynamic temperature per request is {sampling_params.use_dynamic_temperature}")
+            self.use_dynamic_temperature_cpu[req_index] = sampling_params.use_dynamic_temperature
+            if sampling_params.use_dynamic_temperature:
+                self.use_dynamic_temperature_reqs.add(req_id)
+                
+            self.initial_temperature_cpu[req_index] = sampling_params.initial_temperature
+            self.final_temperature_cpu[req_index] = sampling_params.final_temperature
+            
+            # Initialize current step to 0 for new requests
+            self.current_step_cpu[req_index] = 0
+            
+            # Set max_steps from sampling_params.max_tokens or a default value
+            max_steps = getattr(sampling_params, 'max_tokens', 100)
+            if max_steps is None:
+                max_steps = 100  # Default fallback
+            self.max_steps_cpu[req_index] = max_steps
+            
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
             if request.generator is not None:
@@ -412,6 +479,7 @@ class InputBatch:
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
+        self.use_dynamic_temperature_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
@@ -466,6 +534,17 @@ class InputBatch:
             self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+            
+        self.use_dynamic_temperature_cpu[i1], self.use_dynamic_temperature_cpu[i2] = \
+            self.use_dynamic_temperature_cpu[i2], self.use_dynamic_temperature_cpu[i1]
+        self.initial_temperature_cpu[i1], self.initial_temperature_cpu[i2] = \
+            self.initial_temperature_cpu[i2], self.initial_temperature_cpu[i1]
+        self.final_temperature_cpu[i1], self.final_temperature_cpu[i2] = \
+            self.final_temperature_cpu[i2], self.final_temperature_cpu[i1]
+        self.current_step_cpu[i1], self.current_step_cpu[i2] = \
+            self.current_step_cpu[i2], self.current_step_cpu[i1]
+        self.max_steps_cpu[i1], self.max_steps_cpu[i2] = \
+            self.max_steps_cpu[i2], self.max_steps_cpu[i1]
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -563,6 +642,13 @@ class InputBatch:
                 empty_index] = self.presence_penalties_cpu[last_req_index]
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
+            
+            self.use_dynamic_temperature_cpu[empty_index] = self.use_dynamic_temperature_cpu[last_req_index]
+            self.initial_temperature_cpu[empty_index] = self.initial_temperature_cpu[last_req_index]
+            self.final_temperature_cpu[empty_index] = self.final_temperature_cpu[last_req_index]
+            self.current_step_cpu[empty_index] = self.current_step_cpu[last_req_index]
+            self.max_steps_cpu[empty_index] = self.max_steps_cpu[last_req_index]
+
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -622,7 +708,17 @@ class InputBatch:
                        self.presence_penalties, num_reqs)
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
-
+        if not self.no_dynamic_temperature:
+          copy_slice(self.use_dynamic_temperature_cpu_tensor,
+                    self.use_dynamic_temperature, num_reqs)
+          copy_slice(self.initial_temperature_cpu_tensor,
+                    self.initial_temperature, num_reqs)
+          copy_slice(self.final_temperature_cpu_tensor,
+                    self.final_temperature, num_reqs)
+          copy_slice(self.current_step_cpu_tensor,
+                    self.current_step, num_reqs)
+          copy_slice(self.max_steps_cpu_tensor,
+                    self.max_steps, num_reqs)
         needs_prompt_token_ids = (
             not self.no_penalties
             or self.logits_processing_needs_token_ids[:num_reqs].any())
@@ -659,6 +755,11 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            use_dynamic_temperature=None if self.no_dynamic_temperature else self.use_dynamic_temperature[:num_reqs],
+            initial_temperature=None if self.no_dynamic_temperature else self.initial_temperature[:num_reqs],
+            final_temperature=None if self.no_dynamic_temperature else self.final_temperature[:num_reqs],
+            current_step=None if self.no_dynamic_temperature else self.current_step[:num_reqs],
+            max_steps=None if self.no_dynamic_temperature else self.max_steps[:num_reqs],
         )
 
     @property
@@ -748,6 +849,10 @@ class InputBatch:
                 and len(self.repetition_penalties_reqs) == 0)
 
     @property
+    def no_dynamic_temperature(self) -> bool:
+        return len(self.use_dynamic_temperature_reqs) == 0
+      
+    @property
     def max_num_logprobs(self) -> Optional[int]:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
 
@@ -758,3 +863,10 @@ class InputBatch:
     @property
     def no_allowed_token_ids(self) -> bool:
         return len(self.has_allowed_token_ids) == 0
+
+    def increment_current_steps(self) -> None:
+        """Increment current step for all active requests using dynamic temperature."""
+        for req_id in self.use_dynamic_temperature_reqs:
+            if req_id in self.req_id_to_index:
+                req_index = self.req_id_to_index[req_id]
+                self.current_step_cpu[req_index] += 1

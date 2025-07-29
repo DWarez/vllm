@@ -41,3 +41,10 @@ class SamplingMetadata:
 
     # Loaded logits processors
     logitsprocs: LogitsProcessorManager
+
+    # Dynamic Temperature
+    use_dynamic_temperature: Optional[torch.Tensor] = None
+    initial_temperature: Optional[torch.Tensor] = None
+    final_temperature: Optional[torch.Tensor] = None
+    current_step: Optional[torch.Tensor] = None
+    max_steps: Optional[torch.Tensor] = None
