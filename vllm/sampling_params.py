@@ -110,16 +110,6 @@ class RequestOutputKind(Enum):
     FINAL_ONLY = 2
 
 
-# Dynamic Temperature
-@dataclass
-class DynamicTemperatureConfig:
-    start_temp: float
-    end_temp: float
-    decay_steps: Optional[int] = None
-    decay_type: str = "linear"  # "linear" or "exponential"
-
-
-
 class SamplingParams(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -260,6 +250,13 @@ class SamplingParams(
     use_dynamic_temperature: bool = True
     initial_temperature: float = 1.2
     final_temperature: float = 0.6
+    
+    # XTC
+    use_xtc: bool = False
+    xtc_exclude_top: int = 1
+    xtc_exclusion_threshold: float = 0.1
+    xtc_min_probability: float = 0.01
+
 
     @staticmethod
     def from_optional(
@@ -269,7 +266,6 @@ class SamplingParams(
         frequency_penalty: Optional[float] = 0.0,
         repetition_penalty: Optional[float] = 1.0,
         temperature: Optional[float] = 1.0,
-        dynamic_temperature: Optional[DynamicTemperatureConfig] = None,
         top_p: Optional[float] = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,

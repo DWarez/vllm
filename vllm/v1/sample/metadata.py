@@ -48,3 +48,10 @@ class SamplingMetadata:
     final_temperature: Optional[torch.Tensor] = None
     current_step: Optional[torch.Tensor] = None
     max_steps: Optional[torch.Tensor] = None
+    
+    # XTC
+    use_xtc: Optional[torch.Tensor] = None
+    xtc_exclude_top: Optional[torch.Tensor] = None
+    xtc_exclusion_threshold: Optional[torch.Tensor] = None
+    xtc_min_probability: Optional[torch.Tensor] = None
+

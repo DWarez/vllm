@@ -93,6 +93,7 @@ class Sampler(nn.Module):
         )
         return sampler_output
 
+    # Dynamic Temperature
     def compute_dynamic_temperature(
         self,
         sampling_metadata: SamplingMetadata,
@@ -123,7 +124,7 @@ class Sampler(nn.Module):
                                           torch.is_tensor(sampling_metadata.use_dynamic_temperature) 
                                           else sampling_metadata.use_dynamic_temperature))
         if has_use_dynamic_temperature and not use_dynamic_temperature_enabled:
-            logger.warning("Dynamic temperature disabled via use_dynamic_temperature=False")
+            # logger.warning("Dynamic temperature disabled via use_dynamic_temperature=False")
             return temperature
         
         has_initial_temperature = hasattr(sampling_metadata, 'initial_temperature')
@@ -178,9 +179,9 @@ class Sampler(nn.Module):
                 # Apply to all requests
                 temperature.copy_(dynamic_temp)
                 
-        logger.warning(f"temperature: {temperature}")
+        # logger.warning(f"temperature: {temperature}")
         return temperature
-      
+    
     def apply_temperature(
         self,
         logits: torch.Tensor,
@@ -193,6 +194,51 @@ class Sampler(nn.Module):
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
 
+    
+    # XTC
+    def apply_xtc(
+      self,
+      logits: torch.Tensor,
+      sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+      """Apply XTC (Exclude Top Choice) filtering to logits."""
+      if (sampling_metadata.use_xtc is None or 
+          not sampling_metadata.use_xtc.any()):
+          return logits
+      
+      # Convert logits to probabilities
+      probs = torch.softmax(logits, dim=-1)
+      
+      for i in range(logits.shape[0]):
+          if not sampling_metadata.use_xtc[i]:
+              continue
+              
+          exclude_top = sampling_metadata.xtc_exclude_top[i].item()
+          exclusion_threshold = sampling_metadata.xtc_exclusion_threshold[i].item()
+          min_probability = sampling_metadata.xtc_min_probability[i].item()
+          
+          # Get top-k indices and probabilities
+          top_probs, top_indices = torch.topk(probs[i], k=min(exclude_top + 10, probs.shape[-1]))
+          
+          # Track discarded token IDs for warning
+          discarded_ids = []
+          
+          # Apply exclusion logic
+          for j in range(min(exclude_top, len(top_indices))):
+              top_prob = top_probs[j].item()
+              top_idx = top_indices[j].item()
+              
+              # Exclude if probability exceeds threshold and is above minimum
+              if top_prob >= exclusion_threshold and top_prob >= min_probability:
+                  logits[i, top_idx] = float('-inf')
+                  discarded_ids.append(top_idx)
+          
+          # One-liner warning for discarded token IDs
+          if discarded_ids: logger.warning(f"XTC discarded token IDs: {discarded_ids}")
+      
+      return logits
+    
+    
     def sample(
         self,
         logits: torch.Tensor,
@@ -224,6 +270,7 @@ class Sampler(nn.Module):
         for processor in sampling_metadata.logitsprocs.argmax_invariant:
             logits = processor.apply(logits)
 
+        logits = self.apply_xtc(logits, sampling_metadata)
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
             logits,

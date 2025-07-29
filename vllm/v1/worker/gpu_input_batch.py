@@ -238,6 +238,25 @@ class InputBatch:
                                                pin_memory=pin_memory)
         self.max_steps_cpu = self.max_steps_cpu_tensor.numpy()
         
+        # XTC related
+        self.use_xtc = torch.empty((max_num_reqs, ), dtype=torch.bool, device=device)
+        self.use_xtc_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.bool, device="cpu", pin_memory=pin_memory)
+        self.use_xtc_cpu = self.use_xtc_cpu_tensor.numpy()
+        self.use_xtc_reqs: set[str] = set()
+
+        self.xtc_exclude_top = torch.empty((max_num_reqs, ), dtype=torch.int32, device=device)
+        self.xtc_exclude_top_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.int32, device="cpu", pin_memory=pin_memory)
+        self.xtc_exclude_top_cpu = self.xtc_exclude_top_cpu_tensor.numpy()
+
+        self.xtc_exclusion_threshold = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
+        self.xtc_exclusion_threshold_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+        self.xtc_exclusion_threshold_cpu = self.xtc_exclusion_threshold_cpu_tensor.numpy()
+
+        self.xtc_min_probability = torch.empty((max_num_reqs, ), dtype=torch.float32, device=device)
+        self.xtc_min_probability_cpu_tensor = torch.empty((max_num_reqs, ), dtype=torch.float32, device="cpu", pin_memory=pin_memory)
+        self.xtc_min_probability_cpu = self.xtc_min_probability_cpu_tensor.numpy()
+        
+        
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -398,6 +417,14 @@ class InputBatch:
                 max_steps = 100  # Default fallback
             self.max_steps_cpu[req_index] = max_steps
             
+            self.use_xtc_cpu[req_index] = sampling_params.use_xtc
+            if sampling_params.use_xtc:
+                self.use_xtc_reqs.add(req_id)
+
+            self.xtc_exclude_top_cpu[req_index] = sampling_params.xtc_exclude_top
+            self.xtc_exclusion_threshold_cpu[req_index] = sampling_params.xtc_exclusion_threshold
+            self.xtc_min_probability_cpu[req_index] = sampling_params.xtc_min_probability
+
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
             if request.generator is not None:
@@ -480,6 +507,7 @@ class InputBatch:
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
         self.use_dynamic_temperature_reqs.discard(req_id)
+        self.use_xtc_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
@@ -545,6 +573,12 @@ class InputBatch:
             self.current_step_cpu[i2], self.current_step_cpu[i1]
         self.max_steps_cpu[i1], self.max_steps_cpu[i2] = \
             self.max_steps_cpu[i2], self.max_steps_cpu[i1]
+            
+        self.use_xtc_cpu[i1], self.use_xtc_cpu[i2] = self.use_xtc_cpu[i2], self.use_xtc_cpu[i1]
+        self.xtc_exclude_top_cpu[i1], self.xtc_exclude_top_cpu[i2] = self.xtc_exclude_top_cpu[i2], self.xtc_exclude_top_cpu[i1]
+        self.xtc_exclusion_threshold_cpu[i1], self.xtc_exclusion_threshold_cpu[i2] = self.xtc_exclusion_threshold_cpu[i2], self.xtc_exclusion_threshold_cpu[i1]
+        self.xtc_min_probability_cpu[i1], self.xtc_min_probability_cpu[i2] = self.xtc_min_probability_cpu[i2], self.xtc_min_probability_cpu[i1]
+
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -648,6 +682,12 @@ class InputBatch:
             self.final_temperature_cpu[empty_index] = self.final_temperature_cpu[last_req_index]
             self.current_step_cpu[empty_index] = self.current_step_cpu[last_req_index]
             self.max_steps_cpu[empty_index] = self.max_steps_cpu[last_req_index]
+            
+            self.use_xtc_cpu[empty_index] = self.use_xtc_cpu[last_req_index]
+            self.xtc_exclude_top_cpu[empty_index] = self.xtc_exclude_top_cpu[last_req_index]
+            self.xtc_exclusion_threshold_cpu[empty_index] = self.xtc_exclusion_threshold_cpu[last_req_index]
+            self.xtc_min_probability_cpu[empty_index] = self.xtc_min_probability_cpu[last_req_index]
+
 
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
@@ -719,6 +759,12 @@ class InputBatch:
                     self.current_step, num_reqs)
           copy_slice(self.max_steps_cpu_tensor,
                     self.max_steps, num_reqs)
+        if not self.no_xtc:
+          copy_slice(self.use_xtc_cpu_tensor, self.use_xtc, num_reqs)
+          copy_slice(self.xtc_exclude_top_cpu_tensor, self.xtc_exclude_top, num_reqs)
+          copy_slice(self.xtc_exclusion_threshold_cpu_tensor, self.xtc_exclusion_threshold, num_reqs)
+          copy_slice(self.xtc_min_probability_cpu_tensor, self.xtc_min_probability, num_reqs)
+
         needs_prompt_token_ids = (
             not self.no_penalties
             or self.logits_processing_needs_token_ids[:num_reqs].any())
@@ -760,6 +806,10 @@ class InputBatch:
             final_temperature=None if self.no_dynamic_temperature else self.final_temperature[:num_reqs],
             current_step=None if self.no_dynamic_temperature else self.current_step[:num_reqs],
             max_steps=None if self.no_dynamic_temperature else self.max_steps[:num_reqs],
+            use_xtc=None if self.no_xtc else self.use_xtc[:num_reqs],
+            xtc_exclude_top=None if self.no_xtc else self.xtc_exclude_top[:num_reqs],
+            xtc_exclusion_threshold=None if self.no_xtc else self.xtc_exclusion_threshold[:num_reqs],
+            xtc_min_probability=None if self.no_xtc else self.xtc_min_probability[:num_reqs],
         )
 
     @property
@@ -851,6 +901,10 @@ class InputBatch:
     @property
     def no_dynamic_temperature(self) -> bool:
         return len(self.use_dynamic_temperature_reqs) == 0
+      
+    @property
+    def no_xtc(self) -> bool:
+        return len(self.use_xtc_reqs) == 0
       
     @property
     def max_num_logprobs(self) -> Optional[int]:
