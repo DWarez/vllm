@@ -1,12 +1,14 @@
 from vllm import LLM, SamplingParams
 
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="microsoft/Phi-3-mini-4k-instruct")
 
 sampling_params = SamplingParams(
+    temperature=0.8,
+    top_p=0.95,
+    max_tokens=512,
     use_dynamic_temperature=True,
     initial_temperature=0.8,
     final_temperature=0.2,
-    max_tokens=100,
     use_dry=True,
     dry_multiplier=0.8,
     dry_base=1.75,
@@ -14,9 +16,12 @@ sampling_params = SamplingParams(
     dry_sequence_breakers=[198, 25, 9, 42, 34],
 )
 
-prompts = ["Once upon a time, in a magical kingdom,"]
-outputs = llm.generate(prompts, sampling_params=sampling_params)
+messages = [
+    {"role": "user", "content": "Explain the concept of recursion in programming with a simple example."}
+]
+
+outputs = llm.chat(messages, sampling_params)
 
 for output in outputs:
     generated_text = output.outputs[0].text
-    print(f"Generated: {generated_text}")
+    print(generated_text)
