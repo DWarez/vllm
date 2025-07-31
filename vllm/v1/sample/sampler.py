@@ -115,7 +115,7 @@ class Sampler(nn.Module):
             torch.Tensor: Updated temperature values for each request
         """
         # Start with the base temperature
-        temperature = sampling_metadata.temperature.clone()
+        temperature = sampling_metadata.temperature
 
         # Check individual conditions and log warnings
         has_use_dynamic_temperature = hasattr(
@@ -280,9 +280,22 @@ class Sampler(nn.Module):
         if (
             sampling_metadata.use_dry is None
             or not sampling_metadata.use_dry.any()
-            or sampling_metadata.prompt_token_ids is None
         ):
+            # logger.warning("DRY DEBUG: Early return - use_dry conditions not met")
             return logits
+
+        # Check if we have any context at all (either prompt or output tokens)
+        has_context = False
+        if sampling_metadata.prompt_token_ids is not None:
+            has_context = True
+        elif hasattr(sampling_metadata, 'output_token_ids') and sampling_metadata.output_token_ids:
+            has_context = True
+        
+        if not has_context:
+            # logger.warning("DRY DEBUG: No context available (no prompt_token_ids or output_token_ids)")
+            return logits
+
+        # logger.warning("DRY DEBUG: Proceeding with DRY penalty application")
 
         for i in range(logits.shape[0]):
             if not sampling_metadata.use_dry[i]:
@@ -292,25 +305,48 @@ class Sampler(nn.Module):
             multiplier = sampling_metadata.dry_multiplier[i].item()
             base = sampling_metadata.dry_base[i].item()
             allowed_length = sampling_metadata.dry_allowed_length[i].item()
-            sequence_breakers = sampling_metadata.dry_sequence_breakers.get(
-                i, []
-            )
+            sequence_breakers = set(sampling_metadata.dry_sequence_breakers.get(i, []))
 
-            # Get the full context (prompt + generated tokens)
-            prompt_tokens = sampling_metadata.prompt_token_ids[i].tolist()
-            output_tokens = (
-                sampling_metadata.output_token_ids[i]
-                if i < len(sampling_metadata.output_token_ids)
-                else []
-            )
-            full_context = prompt_tokens + output_tokens
+            # logger.warning(f"DRY DEBUG: Request {i} - multiplier={multiplier}, base={base}, allowed_length={allowed_length}")
 
-            # Track penalties applied
+            # Get the full context - handle case where prompt_token_ids might be None
+            full_context = []
+            
+            # Add prompt tokens if available
+            if sampling_metadata.prompt_token_ids is not None and i < len(sampling_metadata.prompt_token_ids):
+                prompt_tokens = sampling_metadata.prompt_token_ids[i]
+                if hasattr(prompt_tokens, 'tolist'):
+                    full_context.extend(prompt_tokens.tolist())
+                elif isinstance(prompt_tokens, list):
+                    full_context.extend(prompt_tokens)
+            
+            # Add output tokens if available
+            if hasattr(sampling_metadata, 'output_token_ids') and sampling_metadata.output_token_ids:
+                if i < len(sampling_metadata.output_token_ids):
+                    output_tokens = sampling_metadata.output_token_ids[i]
+                    if isinstance(output_tokens, list):
+                        full_context.extend(output_tokens)
+                    elif hasattr(output_tokens, 'tolist'):
+                        full_context.extend(output_tokens.tolist())
+
+            # logger.warning(f"DRY DEBUG: Full context length: {len(full_context)}")
+            # logger.warning(f"DRY DEBUG: Last 20 tokens: {full_context[-20:]}")
+            
+            # Skip if context is too short
+            if len(full_context) < allowed_length + 1:  # Need at least allowed_length + 1 for any penalty
+                # logger.warning(f"DRY DEBUG: Context too short ({len(full_context)} < {allowed_length + 1})")
+                continue
+
+            # Pre-compute candidate tokens to check
+            candidate_tokens = self._get_dry_candidate_tokens(full_context, sequence_breakers)
+            
+            # logger.warning(f"DRY DEBUG: Found {len(candidate_tokens)} candidate tokens: {sorted(list(candidate_tokens))}")
+            
             penalties_applied = 0
             total_penalty = 0.0
 
-            # For each possible next token, check if it would create a repetition
-            for token_id in range(logits.shape[-1]):
+            # Check each candidate token
+            for token_id in candidate_tokens:
                 penalty = self._calculate_dry_penalty(
                     full_context,
                     token_id,
@@ -324,67 +360,99 @@ class Sampler(nn.Module):
                     penalties_applied += 1
                     total_penalty += penalty
 
-            # Summary log for this request
-            if penalties_applied > 0:
-                logger.warning(
-                    f"DRY summary for request {i}: {penalties_applied} tokens penalized, "
-                    f"total_penalty={total_penalty:.3f}, context_length={len(full_context)}, "
-                    f"params: multiplier={multiplier}, base={base}, allowed_length={allowed_length}"
-                )
+            logger.warning(f"DRY DEBUG: Applied {penalties_applied} penalties, total_penalty={total_penalty:.3f}")
+
         return logits
+
+
+    def _get_dry_candidate_tokens(self, context, sequence_breakers):
+        """Get tokens that could potentially extend matching sequences (optimization)."""
+        if len(context) < 2:
+            return set()
+        
+        # Look at recent tokens that could be part of repeated sequences
+        # This avoids checking every token in the vocabulary
+        recent_window = min(200, len(context))
+        candidate_tokens = set(context[-recent_window:])
+        
+        # Also include tokens that appear right after sequence breakers
+        # as these are common repetition points
+        for i in range(len(context) - 1):
+            if context[i] in sequence_breakers and i + 1 < len(context):
+                candidate_tokens.add(context[i + 1])
+        
+        return candidate_tokens
 
     def _calculate_dry_penalty(
         self,
-        context: list[int],
-        next_token: int,
-        multiplier: float,
-        base: float,
-        allowed_length: int,
-        sequence_breakers: list[int],
+        context,
+        next_token,
+        multiplier,
+        base,
+        allowed_length,
+        sequence_breakers,
     ) -> float:
         """Calculate DRY penalty for a specific token."""
-        if not context:
+        if len(context) < allowed_length:
             return 0.0
 
-        # Create the sequence that would result from adding next_token
+        # What the context would look like with next_token added
         extended_context = context + [next_token]
-        context_len = len(extended_context)
-
-        # Look for the longest matching sequence ending at the current position
-        max_match_length = 0
-
-        for start_pos in range(context_len - 1):
-            # Check if there's a sequence breaker that would interrupt matching
-            has_breaker = any(
-                token in sequence_breakers
-                for token in extended_context[start_pos:]
-            )
-            if has_breaker:
-                continue
-
-            # Find matching sequence length
-            match_length = 0
-            for offset in range(min(context_len - start_pos, context_len)):
-                if start_pos + offset >= context_len:
-                    break
-                if (
-                    extended_context[start_pos + offset]
-                    != extended_context[context_len - 1 - offset]
-                ):
-                    break
-                match_length += 1
-
-            max_match_length = max(max_match_length, match_length)
+        
+        # logger.warning(f"DRY DEBUG: Checking token {next_token}, context_len={len(context)}, allowed_length={allowed_length}")
+        
+        # Find the longest sequence ending at the current position that 
+        # matches a sequence appearing earlier in the context
+        max_match_length = self._find_longest_dry_repetition(
+            extended_context, sequence_breakers
+        )
+        
+        # logger.warning(f"DRY DEBUG: Found max_match_length={max_match_length} for token {next_token}")
 
         # Apply penalty if match exceeds allowed length
         if max_match_length > allowed_length:
             penalty = multiplier * (base ** (max_match_length - allowed_length))
-            logger.warning(
-                f"DRY penalty applied: match_length={max_match_length}, penalty={penalty:.3f}, token={next_token}"
-            )
+            # logger.warning(f"DRY PENALTY APPLIED: match_length={max_match_length}, penalty={penalty:.3f}, token={next_token}")
             return penalty
-
+        # logger.warning(f"DRY NO PENALTY: match_length={max_match_length} <= allowed_length={allowed_length}")
         return 0.0
+
+    def _find_longest_dry_repetition(self, context, sequence_breakers):
+        """Find the longest sequence at the end that repeats from earlier in context."""
+        context_len = len(context)
+        max_match_length = 0
+        
+        # Start from longest possible and work down (optimization)
+        max_possible_length = min(context_len // 2, context_len)
+        
+        for seq_len in range(max_possible_length, 0, -1):
+            if seq_len <= max_match_length:
+                break  # Already found a longer match
+                
+            # The sequence we're checking (at the end)
+            end_sequence = context[-seq_len:]
+            
+            # Skip if this sequence contains breakers - they reset matching
+            if any(token in sequence_breakers for token in end_sequence):
+                continue
+            
+            # Look for this exact sequence earlier in the context
+            # Stop before we overlap with the end sequence
+            search_limit = context_len - seq_len
+            
+            for start_pos in range(search_limit):
+                candidate_sequence = context[start_pos:start_pos + seq_len]
+                
+                # Skip if candidate contains breakers
+                if any(token in sequence_breakers for token in candidate_sequence):
+                    continue
+                
+                # Check for exact match
+                if candidate_sequence == end_sequence:
+                    max_match_length = max(max_match_length, seq_len)
+                    break  # Found match for this length, try longer
+        
+        return max_match_length
 
     def sample(
         self,

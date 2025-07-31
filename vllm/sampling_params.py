@@ -248,6 +248,7 @@ class SamplingParams(
     use_dynamic_temperature: bool = False
     initial_temperature: Optional[float] = None
     final_temperature: Optional[float] = None
+    max_steps: Optional[int] = None
     
     # XTC
     use_xtc: bool = False
