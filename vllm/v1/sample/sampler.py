@@ -176,7 +176,7 @@ class Sampler(nn.Module):
             # Use current_step + 1 because we want the temperature for the NEXT token
             # current_step represents completed steps, but we're generating step current_step + 1
             current_step = sampling_metadata.current_step + 1
-            logger.warning(f"current step: {current_step}")
+            # logger.warning(f"current step: {current_step}")
             max_steps = sampling_metadata.max_steps
 
             # Compute linear interpolation factor
@@ -266,8 +266,8 @@ class Sampler(nn.Module):
                     logits[i, top_idx] = float("-inf")
                     discarded_ids.append(top_idx)
 
-            if discarded_ids:
-                logger.warning(f"XTC discarded token IDs: {discarded_ids}")
+            # if discarded_ids:
+                # logger.warning(f"XTC discarded token IDs: {discarded_ids}")
         return logits
 
     # DRY
@@ -360,7 +360,7 @@ class Sampler(nn.Module):
                     penalties_applied += 1
                     total_penalty += penalty
 
-            logger.warning(f"DRY DEBUG: Applied {penalties_applied} penalties, total_penalty={total_penalty:.3f}")
+            # logger.warning(f"DRY DEBUG: Applied {penalties_applied} penalties, total_penalty={total_penalty:.3f}")
 
         return logits
 

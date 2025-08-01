@@ -14,6 +14,7 @@ class SamplerConfig:
     use_dynamic_temperature: bool = False
     initial_temperature: Optional[float] = None
     final_temperature: Optional[float] = None
+    max_steps: Optional[int] = None
     use_xtc: bool = False
     xtc_exclude_top: Optional[int] = None
     xtc_exclusion_threshold: Optional[float] = None
@@ -43,7 +44,8 @@ class VLLMBenchmark:
                 name="dynamic_temp_light",
                 use_dynamic_temperature=True,
                 initial_temperature=1.0,
-                final_temperature=0.4
+                final_temperature=0.4,
+                max_steps=50,
             ),
             
             SamplerConfig(
@@ -92,6 +94,7 @@ class VLLMBenchmark:
                 use_dynamic_temperature=True,
                 initial_temperature=1.2,
                 final_temperature=0.3,
+                max_steps=50,
                 use_xtc=True,
                 xtc_exclude_top=10,
                 xtc_exclusion_threshold=0.15,
@@ -116,6 +119,7 @@ class VLLMBenchmark:
                 use_dynamic_temperature=True,
                 initial_temperature=1.1,
                 final_temperature=0.35,
+                max_steps=50,
                 use_xtc=True,
                 xtc_exclude_top=15,
                 xtc_exclusion_threshold=0.2,
@@ -140,7 +144,8 @@ class VLLMBenchmark:
             params.update({
                 "use_dynamic_temperature": True,
                 "initial_temperature": config.initial_temperature,
-                "final_temperature": config.final_temperature
+                "final_temperature": config.final_temperature,
+                "max_steps": config.max_steps,
             })
         
         if config.use_xtc:

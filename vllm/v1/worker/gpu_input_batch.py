@@ -433,6 +433,8 @@ class InputBatch:
                 
                 # Set max_steps from sampling_params.max_tokens or a default value
                 max_steps = getattr(sampling_params, 'max_steps', 100)
+                if max_steps is None:
+                    max_steps = 100  # Default fallback I don't understand why the default above seems to not be working
                 self.max_steps_cpu[req_index] = max_steps
             
         
