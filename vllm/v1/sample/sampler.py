@@ -194,7 +194,7 @@ class Sampler(nn.Module):
             dynamic_temp = (
                 initial_temp + (final_temp - initial_temp) * step_ratio
             )
-            logger.warning(f"dynamic temp: {dynamic_temp}")
+            # logger.warning(f"dynamic temp: {dynamic_temp}")
 
             # Apply dynamic temperature only to requests that have it enabled
             if torch.is_tensor(sampling_metadata.use_dynamic_temperature):
@@ -307,6 +307,10 @@ class Sampler(nn.Module):
             allowed_length = sampling_metadata.dry_allowed_length[i].item()
             sequence_breakers = set(sampling_metadata.dry_sequence_breakers.get(i, []))
 
+            # Skip if multiplier is 0 (disabled) - optimization
+            if multiplier == 0:
+                continue
+
             # logger.warning(f"DRY DEBUG: Request {i} - multiplier={multiplier}, base={base}, allowed_length={allowed_length}")
 
             # Get the full context - handle case where prompt_token_ids might be None
@@ -337,17 +341,17 @@ class Sampler(nn.Module):
                 # logger.warning(f"DRY DEBUG: Context too short ({len(full_context)} < {allowed_length + 1})")
                 continue
 
-            # Pre-compute candidate tokens to check
-            candidate_tokens = self._get_dry_candidate_tokens(full_context, sequence_breakers)
+            # OPTIMIZED: Pre-compute candidate tokens to check (much smaller set)
+            candidate_tokens = self._get_optimized_candidate_tokens(full_context, sequence_breakers)
             
             # logger.warning(f"DRY DEBUG: Found {len(candidate_tokens)} candidate tokens: {sorted(list(candidate_tokens))}")
             
             penalties_applied = 0
             total_penalty = 0.0
 
-            # Check each candidate token
+            # Check each candidate token (but with optimized matching)
             for token_id in candidate_tokens:
-                penalty = self._calculate_dry_penalty(
+                penalty = self._calculate_dry_penalty_optimized(
                     full_context,
                     token_id,
                     multiplier,
@@ -364,26 +368,30 @@ class Sampler(nn.Module):
 
         return logits
 
-
-    def _get_dry_candidate_tokens(self, context, sequence_breakers):
-        """Get tokens that could potentially extend matching sequences (optimization)."""
+    def _get_optimized_candidate_tokens(self, context, sequence_breakers):
+        """Optimized candidate token selection - only check tokens likely to cause repetition."""
         if len(context) < 2:
             return set()
         
         # Look at recent tokens that could be part of repeated sequences
-        # This avoids checking every token in the vocabulary
-        recent_window = min(200, len(context))
-        candidate_tokens = set(context[-recent_window:])
+        # Use smaller window for performance
+        recent_window = min(100, len(context))
+        recent_tokens = context[-recent_window:]
         
-        # Also include tokens that appear right after sequence breakers
-        # as these are common repetition points
-        for i in range(len(context) - 1):
-            if context[i] in sequence_breakers and i + 1 < len(context):
-                candidate_tokens.add(context[i + 1])
+        # Only include tokens that appear multiple times recently (likely to repeat)
+        token_counts = {}
+        for token in recent_tokens:
+            token_counts[token] = token_counts.get(token, 0) + 1
+        
+        # Filter to tokens that appear at least twice
+        candidate_tokens = {token for token, count in token_counts.items() if count >= 2}
+        
+        # Also include the last few tokens as they're most likely to be extended
+        candidate_tokens.update(context[-5:])
         
         return candidate_tokens
 
-    def _calculate_dry_penalty(
+    def _calculate_dry_penalty_optimized(
         self,
         context,
         next_token,
@@ -392,42 +400,44 @@ class Sampler(nn.Module):
         allowed_length,
         sequence_breakers,
     ) -> float:
-        """Calculate DRY penalty for a specific token."""
+        """Calculate DRY penalty for a specific token - CORRECTED and optimized version."""
         if len(context) < allowed_length:
             return 0.0
 
         # What the context would look like with next_token added
         extended_context = context + [next_token]
         
-        # logger.warning(f"DRY DEBUG: Checking token {next_token}, context_len={len(context)}, allowed_length={allowed_length}")
-        
         # Find the longest sequence ending at the current position that 
         # matches a sequence appearing earlier in the context
-        max_match_length = self._find_longest_dry_repetition(
-            extended_context, sequence_breakers
+        max_match_length = self._find_longest_repetition_optimized(
+            extended_context, sequence_breakers, allowed_length
         )
-        
-        # logger.warning(f"DRY DEBUG: Found max_match_length={max_match_length} for token {next_token}")
 
         # Apply penalty if match exceeds allowed length
         if max_match_length > allowed_length:
             penalty = multiplier * (base ** (max_match_length - allowed_length))
-            # logger.warning(f"DRY PENALTY APPLIED: match_length={max_match_length}, penalty={penalty:.3f}, token={next_token}")
+            
+            # if logger.isEnabledFor(logging.DEBUG):
+            #     logger.debug(
+            #         f"DRY penalty applied: match_length={max_match_length}, "
+            #         f"penalty={penalty:.3f}, token={next_token}"
+            #     )
             return penalty
-        # logger.warning(f"DRY NO PENALTY: match_length={max_match_length} <= allowed_length={allowed_length}")
+
         return 0.0
 
-    def _find_longest_dry_repetition(self, context, sequence_breakers):
-        """Find the longest sequence at the end that repeats from earlier in context."""
+    def _find_longest_repetition_optimized(self, context, sequence_breakers, allowed_length):
+        """Find the longest sequence at the end that repeats from earlier - OPTIMIZED version."""
         context_len = len(context)
         max_match_length = 0
         
-        # Start from longest possible and work down (optimization)
-        max_possible_length = min(context_len // 2, context_len)
+        # OPTIMIZATION: Limit maximum search length to prevent O(n^3) behavior
+        max_search_length = min(200, context_len // 2)  # Don't search more than 200 tokens back
         
-        for seq_len in range(max_possible_length, 0, -1):
-            if seq_len <= max_match_length:
-                break  # Already found a longer match
+        # OPTIMIZATION: Start from a reasonable minimum and work up, with early termination
+        for seq_len in range(allowed_length + 1, max_search_length + 1):
+            if seq_len > context_len:
+                break
                 
             # The sequence we're checking (at the end)
             end_sequence = context[-seq_len:]
@@ -436,21 +446,35 @@ class Sampler(nn.Module):
             if any(token in sequence_breakers for token in end_sequence):
                 continue
             
-            # Look for this exact sequence earlier in the context
-            # Stop before we overlap with the end sequence
-            search_limit = context_len - seq_len
+            # OPTIMIZATION: Use tuple for faster comparison
+            end_tuple = tuple(end_sequence)
             
-            for start_pos in range(search_limit):
+            # Look for this exact sequence earlier in the context
+            # OPTIMIZATION: Limit search range
+            search_limit = min(context_len - seq_len, context_len - seq_len)
+            found_match = False
+            
+            for start_pos in range(max(0, search_limit - 500), search_limit):  # Only search last 500 positions
+                # OPTIMIZATION: Quick check first token to avoid expensive slice
+                if context[start_pos] != end_sequence[0]:
+                    continue
+                    
                 candidate_sequence = context[start_pos:start_pos + seq_len]
                 
                 # Skip if candidate contains breakers
                 if any(token in sequence_breakers for token in candidate_sequence):
                     continue
                 
-                # Check for exact match
-                if candidate_sequence == end_sequence:
-                    max_match_length = max(max_match_length, seq_len)
-                    break  # Found match for this length, try longer
+                # OPTIMIZATION: Use tuple comparison (faster than list comparison)
+                if tuple(candidate_sequence) == end_tuple:
+                    max_match_length = seq_len
+                    found_match = True
+                    break  # Found match for this length
+            
+            # OPTIMIZATION: If we found a match, continue looking for longer matches
+            # If no match found, shorter sequences won't match either due to the nature of DRY
+            if not found_match and max_match_length > 0:
+                break  # No point checking longer sequences
         
         return max_match_length
 

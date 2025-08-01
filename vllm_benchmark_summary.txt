@@ -1,0 +1,103 @@
+================================================================================
+VLLM SAMPLER PERFORMANCE ANALYSIS
+================================================================================
+
+1. OVERALL THROUGHPUT IMPACT:
+--------------------------------------------------
+dynamic_temp_light  : 1.044x ± 0.160
+dynamic_temp_heavy  : 1.037x ± 0.164
+xtc_light           : 0.898x ± 0.235
+xtc_heavy           : 0.800x ± 0.281
+dry_light           : 0.677x ± 0.327
+dry_heavy           : 0.748x ± 0.313
+dynamic_xtc         : 0.823x ± 0.230
+xtc_dry             : 0.651x ± 0.308
+all_samplers        : 0.699x ± 0.412
+
+2. BATCH SIZE SCALING ANALYSIS:
+--------------------------------------------------
+baseline            : 36.60x scaling (BS1→BS32)
+dynamic_temp_light  : 25.35x scaling (BS1→BS32)
+dynamic_temp_heavy  : 25.27x scaling (BS1→BS32)
+xtc_light           : 16.22x scaling (BS1→BS32)
+xtc_heavy           : 11.53x scaling (BS1→BS32)
+dry_light           : 7.52x scaling (BS1→BS32)
+dry_heavy           : 9.53x scaling (BS1→BS32)
+dynamic_xtc         : 14.62x scaling (BS1→BS32)
+xtc_dry             : 7.82x scaling (BS1→BS32)
+all_samplers        : 6.05x scaling (BS1→BS32)
+
+3. LATENCY OVERHEAD BY BATCH SIZE:
+--------------------------------------------------
+Batch Size 1:
+  dynamic_temp_light: -28.6%
+  dynamic_temp_heavy: -28.7%
+  xtc_light         : -26.7%
+  xtc_heavy         : -24.9%
+  dry_light         : -22.1%
+  dry_heavy         : -25.1%
+  dynamic_xtc       : -20.6%
+  xtc_dry           : -18.6%
+  all_samplers      : -34.9%
+Batch Size 2:
+  dynamic_temp_light: +2.7%
+  dynamic_temp_heavy: +3.6%
+  xtc_light         : +7.4%
+  xtc_heavy         : +13.5%
+  dry_light         : +21.3%
+  dry_heavy         : +14.7%
+  dynamic_xtc       : +12.8%
+  xtc_dry           : +26.4%
+  all_samplers      : +26.5%
+Batch Size 4:
+  dynamic_temp_light: +2.7%
+  dynamic_temp_heavy: +5.5%
+  xtc_light         : +14.0%
+  xtc_heavy         : +23.0%
+  dry_light         : +43.4%
+  dry_heavy         : +30.6%
+  dynamic_xtc       : +21.0%
+  xtc_dry           : +51.2%
+  all_samplers      : +49.3%
+Batch Size 8:
+  dynamic_temp_light: +2.7%
+  dynamic_temp_heavy: +3.2%
+  xtc_light         : +14.3%
+  xtc_heavy         : +33.6%
+  dry_light         : +72.3%
+  dry_heavy         : +49.8%
+  dynamic_xtc       : +28.2%
+  xtc_dry           : +80.4%
+  all_samplers      : +87.7%
+Batch Size 16:
+  dynamic_temp_light: +2.9%
+  dynamic_temp_heavy: +3.2%
+  xtc_light         : +35.6%
+  xtc_heavy         : +65.2%
+  dry_light         : +143.6%
+  dry_heavy         : +98.5%
+  dynamic_xtc       : +46.2%
+  xtc_dry           : +143.5%
+  all_samplers      : +143.5%
+Batch Size 32:
+  dynamic_temp_light: +3.0%
+  dynamic_temp_heavy: +3.2%
+  xtc_light         : +65.4%
+  xtc_heavy         : +138.4%
+  dry_light         : +279.4%
+  dry_heavy         : +187.7%
+  dynamic_xtc       : +98.9%
+  xtc_dry           : +281.1%
+  all_samplers      : +294.3%
+
+4. TOKEN GENERATION EFFICIENCY:
+--------------------------------------------------
+dynamic_temp_light  : 1.032x token generation rate
+dynamic_temp_heavy  : 1.030x token generation rate
+xtc_light           : 0.668x token generation rate
+xtc_heavy           : 0.620x token generation rate
+dry_light           : 0.667x token generation rate
+dry_heavy           : 0.745x token generation rate
+dynamic_xtc         : 0.563x token generation rate
+xtc_dry             : 0.453x token generation rate
+all_samplers        : 0.434x token generation rate
